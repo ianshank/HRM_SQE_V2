@@ -1,5 +1,7 @@
-# SQE-Enhanced HRM Configuration
-# This configuration extends the base HRM with Stacked Quantum Ensembles
+# SQE-Enhanced HRM Configuration with Perceiver (Phase 2)
+# This configuration extends the base HRM with:
+# 1. Perceiver preprocessing for abstract feature extraction
+# 2. Stacked Quantum Ensembles for enhanced reasoning
 
 arch:
   # Base HRM configuration (from hrm_v1.yaml)
@@ -7,11 +9,11 @@ arch:
   seq_len: 512
   num_puzzle_identifiers: 65536
   vocab_size: 65536
-  
+
   # Reasoning cycles
   H_cycles: 4
   L_cycles: 6
-  
+
   # Model architecture
   H_layers: 2
   L_layers: 4
@@ -19,14 +21,19 @@ arch:
   expansion: 4.0
   num_heads: 6
   pos_encodings: "rope"
-  
+
   # Halting parameters
   halt_max_steps: 4
   halt_exploration_prob: 0.2
-  
+
   # Precision settings
   forward_dtype: "bfloat16"
-  
+
+  # Phase 2: Perceiver configuration
+  enable_perceiver: true
+  perceiver_num_latents: 256
+  perceiver_num_blocks: 2
+
   # Loss configuration
   loss:
     loss_type: "cross_entropy"
@@ -81,3 +88,35 @@ monitoring:
   track_gradient_flow: true
   track_memory_usage: true
   track_training_stability: true
+
+# Curriculum Learning configuration (Phase 3)
+curriculum_learning:
+  # Enable curriculum learning (can be overridden by --curriculum flag)
+  enable: true
+
+  # Difficulty scoring weights (must sum to 1.0)
+  difficulty:
+    color_weight: 0.4
+    grid_size_weight: 0.3
+    pattern_complexity_weight: 0.3
+
+  # Curriculum schedule configuration
+  schedule:
+    # Schedule type: exponential, linear, or step
+    schedule_type: "exponential"
+
+    # Threshold range [0, 1]
+    initial_threshold: 0.2
+    final_threshold: 1.0
+
+    # Warmup epochs (maintain initial threshold)
+    warmup_epochs: 2
+
+    # Total epochs (will be overridden by --epochs flag)
+    total_epochs: 20
+
+    # Exponential pacing base (only used if schedule_type=exponential)
+    exponential_base: 2.0
+
+  # Initial threshold at start of training
+  initial_threshold: 0.2

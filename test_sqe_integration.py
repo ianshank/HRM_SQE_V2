@@ -130,38 +130,86 @@ def test_gradient_flow(model):
 def test_sqe_components(model):
     """Test SQE-specific components"""
     print("\nTesting SQE components...")
-    
+
     # Check SQE layers exist
     assert hasattr(model, 'sqe_projection'), "Missing sqe_projection"
     assert hasattr(model, 'sqe_norm'), "Missing sqe_norm"
     assert hasattr(model, 'sqe_attention_layers'), "Missing sqe_attention_layers"
-    
+
     print(f"✓ SQE components present")
     print(f"  - Projection layer: {model.sqe_projection}")
     print(f"  - Normalization: {model.sqe_norm}")
     print(f"  - Attention layers: {len(model.sqe_attention_layers)}")
-    
+
+    return True
+
+
+def test_perceiver_integration(model):
+    """Test Perceiver integration (Phase 2)"""
+    print("\nTesting Perceiver integration...")
+
+    if not model.enable_perceiver:
+        print("  ⚠ Perceiver disabled in config, skipping...")
+        return True
+
+    # Check Perceiver components exist
+    assert hasattr(model, 'perceiver'), "Missing perceiver"
+    assert model.perceiver is not None, "Perceiver is None"
+    assert hasattr(model, 'perceiver_to_seq'), "Missing perceiver_to_seq projection"
+
+    print(f"✓ Perceiver components present")
+    print(f"  - Num latents: {model.perceiver_num_latents}")
+    print(f"  - Num blocks: {model.perceiver_num_blocks}")
+    print(f"  - Perceiver params: {model.perceiver.get_num_params():,}")
+
+    # Test Perceiver forward pass
+    batch_size = 2
+    seq_len = 512
+
+    batch = {
+        "inputs": torch.randint(0, 100, (batch_size, seq_len)),
+        "targets": torch.randint(0, 100, (batch_size, seq_len)),
+        "puzzle_identifiers": torch.randint(0, 1000, (batch_size,))
+    }
+
+    # Test preprocessing method
+    model.eval()
+    with torch.no_grad():
+        preprocessed_batch = model._apply_perceiver_preprocessing(batch)
+
+    # Check perceiver features were added
+    if model.enable_perceiver:
+        assert "perceiver_features" in preprocessed_batch, "Missing perceiver_features in batch"
+        feat_shape = preprocessed_batch["perceiver_features"].shape
+        print(f"✓ Perceiver preprocessing successful")
+        print(f"  - Feature shape: {feat_shape}")
+        assert feat_shape[0] == batch_size, "Batch size mismatch"
+        assert feat_shape[1] == seq_len, "Sequence length mismatch"
+
     return True
 
 def main():
     """Run all tests"""
     print("=" * 60)
-    print("SQE-HRM Integration Test Suite")
+    print("SQE-HRM + Perceiver Integration Test Suite (Phase 2)")
     print("=" * 60)
-    
+
     try:
         # Test 1: Model initialization
         model = test_model_initialization()
-        
+
         # Test 2: Forward pass
         outputs = test_forward_pass(model)
-        
+
         # Test 3: Gradient flow
         grad_ok = test_gradient_flow(model)
-        
+
         # Test 4: SQE components
         sqe_ok = test_sqe_components(model)
-        
+
+        # Test 5: Perceiver integration (Phase 2)
+        perceiver_ok = test_perceiver_integration(model)
+
         # Summary
         print("\n" + "=" * 60)
         print("Test Summary")
@@ -170,16 +218,19 @@ def main():
         print(f"✓ Forward Pass: PASSED")
         print(f"{'✓' if grad_ok else '✗'} Gradient Flow: {'PASSED' if grad_ok else 'FAILED'}")
         print(f"{'✓' if sqe_ok else '✗'} SQE Components: {'PASSED' if sqe_ok else 'FAILED'}")
-        
-        if grad_ok and sqe_ok:
-            print("\n🎉 All tests passed! SQE-HRM integration is working correctly.")
+        print(f"{'✓' if perceiver_ok else '✗'} Perceiver Integration: {'PASSED' if perceiver_ok else 'FAILED'}")
+
+        all_passed = grad_ok and sqe_ok and perceiver_ok
+
+        if all_passed:
+            print("\nAll tests passed! Phase 2 integration is working correctly.")
             return 0
         else:
-            print("\n⚠️  Some tests failed. Please review the errors above.")
+            print("\nSome tests failed. Please review the errors above.")
             return 1
-            
+
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\nTest failed with error: {e}")
         import traceback
         traceback.print_exc()
         return 1
