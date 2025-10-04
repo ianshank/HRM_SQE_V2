@@ -88,3 +88,35 @@ monitoring:
   track_gradient_flow: true
   track_memory_usage: true
   track_training_stability: true
+
+# Curriculum Learning configuration (Phase 3)
+curriculum_learning:
+  # Enable curriculum learning (can be overridden by --curriculum flag)
+  enable: true
+
+  # Difficulty scoring weights (must sum to 1.0)
+  difficulty:
+    color_weight: 0.4
+    grid_size_weight: 0.3
+    pattern_complexity_weight: 0.3
+
+  # Curriculum schedule configuration
+  schedule:
+    # Schedule type: exponential, linear, or step
+    schedule_type: "exponential"
+
+    # Threshold range [0, 1]
+    initial_threshold: 0.2
+    final_threshold: 1.0
+
+    # Warmup epochs (maintain initial threshold)
+    warmup_epochs: 2
+
+    # Total epochs (will be overridden by --epochs flag)
+    total_epochs: 20
+
+    # Exponential pacing base (only used if schedule_type=exponential)
+    exponential_base: 2.0
+
+  # Initial threshold at start of training
+  initial_threshold: 0.2
