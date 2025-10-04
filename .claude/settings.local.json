@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(git submodule:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(tee:*)",
+      "Bash(wandb login:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
