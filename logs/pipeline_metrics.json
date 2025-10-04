@@ -1,0 +1,133 @@
+{
+  "pipeline_name": "hrm_default_pipeline",
+  "timestamp": "2025-10-02T23:16:20.664575",
+  "stages": {
+    "parsing": {
+      "success": true,
+      "processing_time": 1.534331,
+      "metadata": {
+        "total_records": 22800,
+        "source_stats": {
+          "security_dataset": {
+            "total_lines": 6600,
+            "parsed": 6600,
+            "errors": 0,
+            "success_rate": 1.0
+          },
+          "swe_dataset": {
+            "total_lines": 9000,
+            "parsed": 9000,
+            "errors": 0,
+            "success_rate": 1.0
+          },
+          "sqe_dataset": {
+            "total_lines": 7200,
+            "parsed": 7200,
+            "errors": 0,
+            "success_rate": 1.0
+          },
+          "reasoning_dataset": {
+            "total_lines": 4000,
+            "parsed": 0,
+            "errors": 4000,
+            "success_rate": 0.0
+          }
+        },
+        "processing_time": 1.534331
+      }
+    },
+    "transformation": {
+      "success": true,
+      "processing_time": 9.607235,
+      "metadata": {
+        "input_records": 22800,
+        "output_examples": 22800,
+        "errors": 0,
+        "success_rate": 1.0,
+        "transformer_stats": {
+          "transform_count": 22800,
+          "error_count": 0,
+          "success_rate": 1.0,
+          "num_puzzle_types": 3,
+          "puzzle_id_map": {
+            "security_dataset_default": 0,
+            "swe_dataset_default": 1,
+            "sqe_dataset_default": 2
+          }
+        },
+        "processing_time": 9.607235
+      }
+    },
+    "validation": {
+      "success": true,
+      "processing_time": 0.059169,
+      "metadata": {
+        "input_examples": 22800,
+        "after_filtering": 70,
+        "after_validation": 70,
+        "validation_failures": 0,
+        "filter_stats": {
+          "EmptyFilter": {
+            "before": 22800,
+            "after": 22800,
+            "removed": 0
+          },
+          "DuplicateFilter": {
+            "before": 22800,
+            "after": 70,
+            "removed": 22730
+          }
+        },
+        "validator_stats": {
+          "LengthValidator": {
+            "validation_count": 70,
+            "pass_count": 70,
+            "fail_count": 0,
+            "pass_rate": 1.0
+          },
+          "CompletenessValidator": {
+            "validation_count": 70,
+            "pass_count": 70,
+            "fail_count": 0,
+            "pass_rate": 1.0
+          },
+          "QualityValidator": {
+            "validation_count": 70,
+            "pass_count": 70,
+            "fail_count": 0,
+            "pass_rate": 1.0
+          }
+        },
+        "processing_time": 0.059169
+      }
+    },
+    "output": {
+      "success": true,
+      "processing_time": 0.02265,
+      "metadata": {
+        "total_examples": 70,
+        "splits": {
+          "train": 56,
+          "val": 7,
+          "test": 7
+        },
+        "output_files": {
+          "train": "C:\\Users\\iansh\\Documents\\HRM\\data\\processed\\train.jsonl",
+          "val": "C:\\Users\\iansh\\Documents\\HRM\\data\\processed\\val.jsonl",
+          "test": "C:\\Users\\iansh\\Documents\\HRM\\data\\processed\\test.jsonl"
+        },
+        "statistics": {
+          "total_examples": 70,
+          "total_tokens": 41020,
+          "avg_length": 82.85714285714286,
+          "min_length": 52,
+          "max_length": 110,
+          "num_puzzle_types": 3,
+          "vocab_size": 65536,
+          "sources": []
+        },
+        "processing_time": 0.02265
+      }
+    }
+  }
+}

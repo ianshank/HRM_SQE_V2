@@ -1,0 +1,83 @@
+# SQE-Enhanced HRM Configuration
+# This configuration extends the base HRM with Stacked Quantum Ensembles
+
+arch:
+  # Base HRM configuration (from hrm_v1.yaml)
+  batch_size: 256
+  seq_len: 512
+  num_puzzle_identifiers: 65536
+  vocab_size: 65536
+  
+  # Reasoning cycles
+  H_cycles: 4
+  L_cycles: 6
+  
+  # Model architecture
+  H_layers: 2
+  L_layers: 4
+  hidden_size: 768
+  expansion: 4.0
+  num_heads: 6
+  pos_encodings: "rope"
+  
+  # Halting parameters
+  halt_max_steps: 4
+  halt_exploration_prob: 0.2
+  
+  # Precision settings
+  forward_dtype: "bfloat16"
+  
+  # Loss configuration
+  loss:
+    loss_type: "cross_entropy"
+    loss_fn_kwargs: {}
+
+# SQE-specific enhancements
+sqe:
+  # SQE architecture parameters
+  sqe_layers: 2
+  sqe_heads: 4
+  
+  # Enhanced training parameters
+  gradient_preservation: true
+  memory_optimization: true
+  
+  # Component-specific learning rates
+  sqe_lr: 7e-5
+  sqe_weight_decay: 0.01
+  
+  # Advanced supervision options
+  use_enhanced_supervision: true
+  supervision_warmup_steps: 1000
+
+# Training configuration
+training:
+  # Basic training parameters
+  global_batch_size: 384
+  epochs: 20000
+  eval_interval: 2000
+  
+  # Learning rates
+  lr: 7e-5
+  puzzle_emb_lr: 7e-5
+  
+  # Regularization
+  weight_decay: 1.0
+  puzzle_emb_weight_decay: 1.0
+  
+  # Enhanced SQE training
+  gradient_clip_norm: 1.0
+  gradient_accumulation_steps: 4
+  use_mixed_precision: true
+  adaptive_loss_weighting: true
+
+# Memory management
+memory:
+  cleanup_frequency: 100
+  max_memory_usage_gb: 12.0
+
+# Monitoring configuration
+monitoring:
+  track_gradient_flow: true
+  track_memory_usage: true
+  track_training_stability: true

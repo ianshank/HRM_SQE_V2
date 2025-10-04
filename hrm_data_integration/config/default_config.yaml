@@ -1,0 +1,129 @@
+# Default HRM Data Integration Pipeline Configuration
+# ===================================================
+# This configuration defines the complete data processing pipeline
+# All values can be overridden via command-line arguments or environment variables
+
+pipeline_name: "hrm_default_pipeline"
+version: "1.0.0"
+description: "Default configuration for HRM data integration"
+
+# Data Sources
+# Define all input data sources with their specific configurations
+sources:
+  - name: "security_dataset"
+    path: "c:/Users/iansh/Documents/drive-download-20251002T230034Z-1-001"
+    format: "jsonl"
+    pattern: "security_production_dataset*.jsonl"
+    encoding: "utf-8"
+    prompt_field: "prompt"
+    completion_field: "completion"
+    metadata_fields: ["agent_type", "model", "domain"]
+    sample_size: null  # null = use all data
+    sample_random: false
+    random_seed: 42
+
+  - name: "swe_dataset"
+    path: "c:/Users/iansh/Documents/drive-download-20251002T230034Z-1-001"
+    format: "jsonl"
+    pattern: "swe_production_dataset*.jsonl"
+    encoding: "utf-8"
+    prompt_field: "prompt"
+    completion_field: "completion"
+    metadata_fields: ["agent_type", "model", "domain"]
+    sample_size: null
+    sample_random: false
+    random_seed: 42
+
+  - name: "sqe_dataset"
+    path: "c:/Users/iansh/Documents/drive-download-20251002T230034Z-1-001"
+    format: "jsonl"
+    pattern: "sqe_production_dataset*.jsonl"
+    encoding: "utf-8"
+    prompt_field: "prompt"
+    completion_field: "completion"
+    metadata_fields: ["agent_type", "model", "domain"]
+    sample_size: null
+    sample_random: false
+    random_seed: 42
+
+  - name: "reasoning_dataset"
+    path: "c:/Users/iansh/Documents/drive-download-20251002T230034Z-1-001"
+    format: "jsonl"
+    pattern: "reasoning_sections_synth.jsonl"
+    encoding: "utf-8"
+    prompt_field: "prompt"
+    completion_field: "completion"
+    metadata_fields: ["agent_type", "model", "domain"]
+    sample_size: null
+    sample_random: false
+    random_seed: 42
+
+# Processing Configuration
+processing_mode: "sequential"  # sequential, parallel, or distributed
+batch_size: 100
+num_workers: 1
+
+# Transformation Configuration
+transformation:
+  # Text processing
+  max_length: 512
+  truncate_strategy: "end"  # start, end, or middle
+  normalize_whitespace: true
+  remove_special_chars: false
+  
+  # Tokenization
+  tokenizer_type: "character"  # character, word, or custom
+  vocab_size: 65536
+  special_tokens:
+    "<PAD>": 0
+    "<UNK>": 1
+    "<BOS>": 2
+    "<EOS>": 3
+    "<SEP>": 4
+  
+  # HRM-specific
+  sequence_length: 512
+  add_puzzle_embedding: true
+  puzzle_id_strategy: "hash"  # hash, index, or custom
+
+# Validation Configuration
+validation:
+  # Quality checks
+  min_length: 10
+  max_length: 100000
+  check_duplicates: true
+  check_completeness: true
+  
+  # Filtering
+  filter_empty: true
+  filter_malformed: true
+  filter_duplicates: true
+  
+  # Thresholds
+  quality_threshold: 0.7
+  completeness_threshold: 0.8
+
+# Output Configuration
+output_dir: "C:/Users/iansh/Documents/HRM/data/processed"
+output_format: "jsonl"
+
+# Train/Val/Test Split Ratios
+split_ratios:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+# HRM Task Type
+hrm_task_type: "reasoning"  # reasoning, code_generation, qa, classification, sequence_labeling
+hrm_config_path: "C:/Users/iansh/Documents/HRM/config/sqe_enhanced.yaml"
+
+# Logging and Monitoring
+log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+log_file: "C:/Users/iansh/Documents/HRM/logs/data_pipeline.log"
+enable_metrics: true
+metrics_output: "C:/Users/iansh/Documents/HRM/logs/pipeline_metrics.json"
+
+# Error Handling
+error_handling: "continue"  # continue, stop, or skip
+max_errors: 100
+
