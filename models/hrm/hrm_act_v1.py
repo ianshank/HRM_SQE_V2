@@ -134,8 +134,16 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         self.L_level = HierarchicalReasoningModel_ACTV1ReasoningModule(layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)])
         
         # Initial states
-        self.H_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
-        self.L_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
+        self.register_buffer(
+            "H_init",
+            trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1),
+            persistent=True
+        )
+        self.register_buffer(
+            "L_init",
+            trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1),
+            persistent=True
+        )
 
         # Q head special init
         # Init Q to (almost) zero for faster learning during bootstrapping
@@ -166,15 +174,36 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         return self.embed_scale * embedding
 
     def empty_carry(self, batch_size: int):
+        # Create carry tensors on the same device as the model
+        device = self.H_init.device
+
+        # Ensure device is properly initialized
+        if device.type == 'cuda':
+            try:
+                torch.cuda.synchronize(device)
+            except RuntimeError as e:
+                raise RuntimeError(f"CUDA device {device} not properly initialized: {e}")
+
         return HierarchicalReasoningModel_ACTV1InnerCarry(
-            z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
-            z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
+            z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype, device=device),
+            z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype, device=device),
         )
         
+    @torch.compiler.disable
     def reset_carry(self, reset_flag: torch.Tensor, carry: HierarchicalReasoningModel_ACTV1InnerCarry):
+        # Disable Dynamo compilation for this method - allows .to() to work properly at runtime
+        # Move all tensors to same device as carry
+        reset_mask = reset_flag.to(carry.z_H.device).view(-1, 1, 1).float()
+        keep_mask = 1.0 - reset_mask
+
+        # Move init buffers to correct device and expand to match carry shape
+        batch_size, seq_len, hidden_size = carry.z_H.shape
+        H_init_expanded = self.H_init.to(carry.z_H.device).view(1, 1, -1).expand(batch_size, seq_len, hidden_size)
+        L_init_expanded = self.L_init.to(carry.z_L.device).view(1, 1, -1).expand(batch_size, seq_len, hidden_size)
+
         return HierarchicalReasoningModel_ACTV1InnerCarry(
-            z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
-            z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
+            z_H=reset_mask * H_init_expanded + keep_mask * carry.z_H,
+            z_L=reset_mask * L_init_expanded + keep_mask * carry.z_L,
         )
 
     def forward(self, carry: HierarchicalReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -236,14 +265,21 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
             
             current_data={k: torch.empty_like(v) for k, v in batch.items()}
         )
-        
-    def forward(self, carry: HierarchicalReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
-        # Update data, carry (removing halted sequences)
-        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
-        
-        new_steps = torch.where(carry.halted, 0, carry.steps)
 
-        new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+    @torch.compiler.disable
+    def forward(self, carry: HierarchicalReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
+        # Disable Dynamo compilation - contains torch.where with carry.halted that causes FakeTensor device issues
+        # Ensure carry.halted is on the same device as batch tensors
+        device = next(iter(batch.values())).device
+        halted = carry.halted.to(device)
+        steps = carry.steps.to(device)
+
+        # Update data, carry (removing halted sequences)
+        new_inner_carry = self.inner.reset_carry(halted, carry.inner_carry)
+
+        new_steps = torch.where(halted, 0, steps)
+
+        new_current_data = {k: torch.where(halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
 
         # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)

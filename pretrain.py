@@ -16,7 +16,11 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+try:
+    from adam_atan2 import AdamATan2
+except ImportError:
+    from torch.optim import AdamW as AdamATan2
+
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
@@ -44,6 +48,7 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Hyperparams
     global_batch_size: int
+    accumulation_steps: int
     epochs: int
 
     lr: float
@@ -75,6 +80,7 @@ class TrainState:
     model: nn.Module
     optimizers: Sequence[torch.optim.Optimizer]
     optimizer_lrs: Sequence[float]
+    device: torch.device
     carry: Any
 
     step: int
@@ -96,16 +102,35 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
         dataset,
         batch_size=None,
 
-        num_workers=1,
-        prefetch_factor=8,
+        num_workers=0,
+        prefetch_factor=None,
 
-        pin_memory=True,
-        persistent_workers=True
+        # Only pin memory when CUDA is available to avoid warnings and no-ops
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=False
     )
     return dataloader, dataset.metadata
 
 
-def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
+def _pick_forward_dtype(requested_dtype: str, device: torch.device) -> str:
+    """Pick a forward dtype that is supported on the target device.
+
+    - If CUDA device does not support bfloat16 (requires sm80+), fall back to float16.
+    - Otherwise use the requested dtype.
+    """
+    try:
+        if device.type == "cuda":
+            # Some GPUs (e.g., T4, V100) do not support BF16 in cuBLAS
+            major, _minor = torch.cuda.get_device_capability(device)
+            if requested_dtype.lower() in ("bfloat16", "torch.bfloat16") and major < 8:
+                return "float16"
+    except Exception:
+        # Be conservative; if we cannot query, return requested
+        pass
+    return requested_dtype
+
+
+def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int, device: torch.device):
     model_cfg = dict(
         **config.arch.__pydantic_extra__,  # type: ignore
 
@@ -117,32 +142,59 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         causal=False  # Non-autoregressive
     )
 
+    # Ensure forward_dtype is compatible with the target device
+    requested_fdtype = str(model_cfg.get("forward_dtype", "bfloat16"))
+    picked_fdtype = _pick_forward_dtype(requested_fdtype, device)
+    if picked_fdtype != requested_fdtype:
+        print(f"info: forward_dtype '{requested_fdtype}' not supported on {device}, using '{picked_fdtype}'")
+    model_cfg["forward_dtype"] = picked_fdtype
+
     # Instantiate model with loss head
     model_cls = load_model_class(config.arch.name)
     loss_head_cls = load_model_class(config.arch.loss.name)
 
-    with torch.device("cuda"):
-        model: nn.Module = model_cls(model_cfg)
-        model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
-        if "DISABLE_COMPILE" not in os.environ:
-            model = torch.compile(model, dynamic=False)  # type: ignore
+    model: nn.Module = model_cls(model_cfg)
+    model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
 
-        # Broadcast parameters from rank 0
-        if world_size > 1:
-            with torch.no_grad():
-                for param in list(model.parameters()) + list(model.buffers()):
-                    dist.broadcast(param, src=0)
+    # Move model to device with explicit error handling
+    try:
+        model = model.to(device)
+        if torch.cuda.is_available() and device.type == "cuda":
+            torch.cuda.synchronize(device)
+    except RuntimeError as e:
+        print(f"Error moving model to {device}: {e}")
+        raise
+    # TEMPORARY: Disable compilation to avoid Triton dependency
+    # if "DISABLE_COMPILE" not in os.environ:
+    #     model = torch.compile(model, dynamic=False)  # type: ignore
+
+    # Broadcast parameters from rank 0
+    if world_size > 1:
+        with torch.no_grad():
+            for param in list(model.parameters()) + list(model.buffers()):
+                dist.broadcast(param, src=0)
 
     # Optimizers and lr
-    optimizers = [
-        CastedSparseEmbeddingSignSGD_Distributed(
+    optimizers = []
+    optimizer_lrs = []
+
+    # Only create sparse embedding optimizer if puzzle embeddings are used
+    if config.arch.puzzle_emb_ndim > 0:
+        sparse_emb_optim = CastedSparseEmbeddingSignSGD_Distributed(
             model.model.puzzle_emb.buffers(),  # type: ignore
-            
+
             lr=0,  # Needs to be set by scheduler
             weight_decay=config.puzzle_emb_weight_decay,
 
             world_size=world_size
-        ),
+        )
+        # Store reference to the module for the optimizer to access local_weights/local_ids
+        sparse_emb_optim.param_groups[0]["sparse_emb_module"] = model.model.puzzle_emb  # type: ignore
+        optimizers.append(sparse_emb_optim)
+        optimizer_lrs.append(config.puzzle_emb_lr)
+
+    # Main model optimizer
+    optimizers.append(
         AdamATan2(
             model.parameters(),
 
@@ -150,11 +202,8 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2)
         )
-    ]
-    optimizer_lrs = [
-        config.puzzle_emb_lr,
-        config.lr
-    ]
+    )
+    optimizer_lrs.append(config.lr)
 
     return model, optimizers, optimizer_lrs
 
@@ -169,12 +218,12 @@ def cosine_schedule_with_warmup_lr_lambda(
     return base_lr * (min_ratio + max(0.0, (1 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))))
 
 
-def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
+def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int, device: torch.device):
     # Estimated total training steps
     total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
 
     # Model
-    model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
+    model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size, device=device)
 
     return TrainState(
         step=0,
@@ -183,6 +232,7 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
         model=model,
         optimizers=optimizers,
         optimizer_lrs=optimizer_lrs,
+        device=device,
         carry=None
     )
 
@@ -206,61 +256,62 @@ def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
     )
 
 
-def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
-    train_state.step += 1
-    if train_state.step > train_state.total_steps:  # At most train_total_steps
-        return
-
+def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, micro_batch_idx: int, rank: int, world_size: int):
     # To device
-    batch = {k: v.cuda() for k, v in batch.items()}
+    batch = {k: v.to(train_state.device) for k, v in batch.items()}
 
     # Init carry if it is None
     if train_state.carry is None:
-        with torch.device("cuda"):
-            train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
+        train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
     # Forward
     train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
 
-    ((1 / global_batch_size) * loss).backward()
+    (loss / config.accumulation_steps).backward()
 
-    # Allreduce
-    if world_size > 1:
-        for param in train_state.model.parameters():
-            if param.grad is not None:
-                dist.all_reduce(param.grad)
-            
-    # Apply optimizer
-    lr_this_step = None    
-    for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
-        lr_this_step = compute_lr(base_lr, config, train_state)
+    # Log metrics on the last micro-batch
+    if micro_batch_idx == config.accumulation_steps - 1:
+        train_state.step += 1
+        if train_state.step > train_state.total_steps:  # At most train_total_steps
+            return
 
-        for param_group in optim.param_groups:
-            param_group['lr'] = lr_this_step
-            
-        optim.step()
-        optim.zero_grad()
-
-    # Reduce metrics
-    if len(metrics):
-        assert not any(v.requires_grad for v in metrics.values())
-
-        metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-        # Reduce and reconstruct
-        metric_values = torch.stack([metrics[k] for k in metric_keys])
+        # Allreduce
         if world_size > 1:
-            dist.reduce(metric_values, dst=0)
+            for param in train_state.model.parameters():
+                if param.grad is not None:
+                    dist.all_reduce(param.grad)
+                
+        # Apply optimizer
+        lr_this_step = None    
+        for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
+            lr_this_step = compute_lr(base_lr, config, train_state)
 
-        if rank == 0:
-            metric_values = metric_values.cpu().numpy()
-            reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
-            
-            # Postprocess
-            count = max(reduced_metrics["count"], 1)  # Avoid NaNs
-            reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
+            for param_group in optim.param_groups:
+                param_group['lr'] = lr_this_step
+                
+            optim.step()
+            optim.zero_grad()
 
-            reduced_metrics["train/lr"] = lr_this_step
-            return reduced_metrics
+        # Reduce metrics
+        if len(metrics):
+            assert not any(v.requires_grad for v in metrics.values())
+
+            metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
+            # Reduce and reconstruct
+            metric_values = torch.stack([metrics[k] for k in metric_keys])
+            if world_size > 1:
+                dist.reduce(metric_values, dst=0)
+
+            if rank == 0:
+                metric_values = metric_values.cpu().numpy()
+                reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
+                
+                # Postprocess
+                count = max(reduced_metrics["count"], 1)  # Avoid NaNs
+                reduced_metrics = {f"train/{k}": v / (config.global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
+
+                reduced_metrics["train/lr"] = lr_this_step
+                return reduced_metrics
 
 
 def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch.utils.data.DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
@@ -276,9 +327,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
         carry = None
         for set_name, batch, global_batch_size in eval_loader:
             # To device
-            batch = {k: v.cuda() for k, v in batch.items()}
-            with torch.device("cuda"):
-                carry = train_state.model.initial_carry(batch)  # type: ignore
+            batch = {k: v.to(train_state.device) for k, v in batch.items()}
+            carry = train_state.model.initial_carry(batch)  # type: ignore
 
             # Forward
             while True:
@@ -300,7 +350,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: torch
             
             if metric_values is None:
                 metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
+                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device=train_state.device)
                 
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             metric_global_batch_size[set_id] += global_batch_size
@@ -381,19 +431,37 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
 def launch(hydra_config: DictConfig):
     RANK = 0
     WORLD_SIZE = 1
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     # Initialize distributed training if in distributed environment (e.g. torchrun)
     if "LOCAL_RANK" in os.environ:
         # Initialize distributed, default device and dtype
-        dist.init_process_group(backend="nccl")
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
 
         RANK = dist.get_rank()
         WORLD_SIZE = dist.get_world_size()
 
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-        
+        if torch.cuda.is_available():
+            local_rank = int(os.environ["LOCAL_RANK"])
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+
     # Load sync'ed config
     config = load_synced_config(hydra_config, rank=RANK, world_size=WORLD_SIZE)
+
+    # Initialize CUDA context explicitly before any operations
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            # Warm up CUDA by allocating and freeing a small tensor
+            _ = torch.zeros(1, device=device)
+            torch.cuda.synchronize()
+            if RANK == 0:
+                print(f"CUDA initialized successfully on device {device}")
+        except Exception as e:
+            print(f"Warning: CUDA initialization failed: {e}")
+            raise
 
     # Seed RNGs to ensure consistency
     torch.random.manual_seed(config.seed + RANK)
@@ -403,20 +471,31 @@ def launch(hydra_config: DictConfig):
     total_iters = config.epochs // train_epochs_per_iter
 
     assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
+    assert config.global_batch_size % config.accumulation_steps == 0, "Accumulation steps must be a divisor of global batch size."
 
-    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+    micro_batch_size = config.global_batch_size // config.accumulation_steps
+    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=micro_batch_size, rank=RANK, world_size=WORLD_SIZE)
     eval_loader,  eval_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
     # Train state
-    train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE)
+    train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE, device=device)
 
     # Progress bar and logger
     progress_bar = None
+    use_wandb = False
     if RANK == 0:
         progress_bar = tqdm.tqdm(total=train_state.total_steps)
 
-        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
-        wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
+        # Only initialize wandb if project name is provided
+        if config.project_name:
+            try:
+                wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
+                wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
+                use_wandb = True
+            except Exception as e:
+                print(f"Warning: Failed to initialize wandb: {e}")
+                print("Continuing training without wandb logging...")
+
         save_code_and_config(config)
 
     # Training Loop
@@ -425,11 +504,13 @@ def launch(hydra_config: DictConfig):
 
         ############ Train Iter
         train_state.model.train()
-        for set_name, batch, global_batch_size in train_loader:
-            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+        for micro_batch_idx, (set_name, batch, global_batch_size) in enumerate(train_loader):
+            micro_batch_idx = micro_batch_idx % config.accumulation_steps
+            metrics = train_batch(config, train_state, batch, micro_batch_idx, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
+                if use_wandb:
+                    wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 
         ############ Evaluation
@@ -437,7 +518,8 @@ def launch(hydra_config: DictConfig):
         metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
 
         if RANK == 0 and metrics is not None:
-            wandb.log(metrics, step=train_state.step)
+            if use_wandb:
+                wandb.log(metrics, step=train_state.step)
             
         ############ Checkpointing
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
@@ -450,4 +532,9 @@ def launch(hydra_config: DictConfig):
 
 
 if __name__ == "__main__":
-    launch()
+    try:
+        launch()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise

@@ -42,12 +42,13 @@ def launch():
     eval_loader,  eval_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
     # Models
-    train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_state = init_train_state(config, train_metadata, world_size=WORLD_SIZE, device=device)
     # Try unwrap torch.compile
     try:
-        train_state.model.load_state_dict(torch.load(eval_cfg.checkpoint, map_location="cuda"), assign=True)
+        train_state.model.load_state_dict(torch.load(eval_cfg.checkpoint, map_location=device), assign=True)
     except:
-        train_state.model.load_state_dict({k.removeprefix("_orig_mod."): v for k, v in torch.load(eval_cfg.checkpoint, map_location="cuda").items()}, assign=True)
+        train_state.model.load_state_dict({k.removeprefix("_orig_mod."): v for k, v in torch.load(eval_cfg.checkpoint, map_location=device).items()}, assign=True)
     
     train_state.step = 0
     ckpt_filename = os.path.basename(eval_cfg.checkpoint)

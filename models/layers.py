@@ -5,10 +5,20 @@ from torch import nn
 import torch.nn.functional as F
 
 try:
-    from flash_attn_interface import flash_attn_func  # type: ignore[import]
+    from flash_attn_interface import flash_attn_func
 except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+    try:
+        from flash_attn import flash_attn_func
+    except ImportError:
+        print("warn: flash_attn not found, using slow attention")
+        def flash_attn_func(q, k, v, causal=False):
+            attn = torch.matmul(q, k.transpose(-2, -1)) / (q.size(-1) ** 0.5)
+            if causal:
+                mask = torch.triu(torch.ones_like(attn), diagonal=1)
+                attn = attn.masked_fill(mask == 1, float('-inf'))
+            attn = F.softmax(attn, dim=-1)
+            return torch.matmul(attn, v)
+
 
 from models.common import trunc_normal_init_
 
@@ -81,15 +91,16 @@ class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings, base, device=None):
         super().__init__()
 
-        # RoPE
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
-        t = torch.arange(max_position_embeddings, dtype=torch.float32, device=device)
+        # RoPE - Initialize on CPU to avoid CUDA initialization issues
+        # Will be moved to correct device when model.to(device) is called
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        t = torch.arange(max_position_embeddings, dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.cos_cached = nn.Buffer(emb.cos(), persistent=False)
-        self.sin_cached = nn.Buffer(emb.sin(), persistent=False)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
     def forward(self):
         return self.cos_cached, self.sin_cached

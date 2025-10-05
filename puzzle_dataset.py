@@ -23,6 +23,12 @@ def _sample_batch(rng: np.random.Generator, group_order: np.ndarray, puzzle_indi
         puzzle_id = rng.integers(group_indices[group_id], group_indices[group_id + 1])
         start_index += 1
 
+        # Validate puzzle_id is within bounds
+        if puzzle_id >= len(puzzle_indices) - 1:
+            raise IndexError(
+                f"Puzzle ID {puzzle_id} out of bounds for puzzle_indices array of size {len(puzzle_indices)}"
+            )
+
         # Get range of the puzzle
         puzzle_start = puzzle_indices[puzzle_id]
         puzzle_size = int(puzzle_indices[puzzle_id + 1] - puzzle_start)
@@ -131,12 +137,20 @@ class PuzzleDataset(IterableDataset):
                 # Get batch of examples, and also puzzle IDs
                 puzzle_indices = []
                 puzzle_index = np.searchsorted(dataset["puzzle_indices"], local_start, side="right") - 1
+                # Ensure puzzle_index is within valid bounds
+                puzzle_index = max(0, min(puzzle_index, len(dataset["puzzle_identifiers"]) - 1))
+
                 for i in range(local_start, local_end):
                     while puzzle_index + 1 < len(dataset["puzzle_indices"]) and i >= dataset["puzzle_indices"][puzzle_index + 1]:
                         puzzle_index += 1
 
+                    # Verify puzzle_index is valid before appending
+                    if puzzle_index >= len(dataset["puzzle_identifiers"]):
+                        raise IndexError(
+                            f"Puzzle index {puzzle_index} out of bounds for puzzle_identifiers array of size {len(dataset['puzzle_identifiers'])}"
+                        )
                     puzzle_indices.append(puzzle_index)
-                
+
                 batch = self._collate_batch({
                     "inputs": dataset["inputs"][local_start: local_end],
                     "labels": dataset["labels"][local_start: local_end],
@@ -156,35 +170,53 @@ class PuzzleDataset(IterableDataset):
             # Randomly shuffle groups
             rng = np.random.Generator(np.random.Philox(seed=self.config.seed + self._iters))
 
-            group_order = np.concatenate([rng.permutation(dataset["group_indices"].size - 1) for _i in range(self.config.epochs_per_iter)])
-            start_index = 0
-            
-            while start_index < group_order.size:
-                start_index, batch_indices, batch_puzzle_indices = _sample_batch(
-                    rng,
-                    group_order=group_order,
-                    puzzle_indices=dataset["puzzle_indices"],
-                    group_indices=dataset["group_indices"],
-                    start_index=start_index,
-                    global_batch_size=self.config.global_batch_size,
-                )
+            num_groups = dataset["group_indices"].size - 1
+            stop_iteration = False
 
-                # Select current rank and collate
-                global_effective_batch_size = batch_puzzle_indices.size  # Global effective batch size, excluding pads
-
-                # Drop last batch
-                if global_effective_batch_size < self.config.global_batch_size:
+            for _i in range(self.config.epochs_per_iter):
+                if stop_iteration:
                     break
 
-                batch_indices        = batch_indices       [self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
-                batch_puzzle_indices = batch_puzzle_indices[self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
-                batch = self._collate_batch({
-                    "inputs": dataset["inputs"][batch_indices],
-                    "labels": dataset["labels"][batch_indices],
-                    "puzzle_identifiers": dataset["puzzle_identifiers"][batch_puzzle_indices]
-                })
+                # Use int32 to reduce memory footprint for very large group counts
+                group_order = rng.permutation(np.arange(num_groups, dtype=np.int32))
+                start_index = 0
 
-                yield set_name, batch, global_effective_batch_size
+                while start_index < group_order.size:
+                    start_index, batch_indices, batch_puzzle_indices = _sample_batch(
+                        rng,
+                        group_order=group_order,
+                        puzzle_indices=dataset["puzzle_indices"],
+                        group_indices=dataset["group_indices"],
+                        start_index=start_index,
+                        global_batch_size=self.config.global_batch_size,
+                    )
+
+                    # Select current rank and collate
+                    global_effective_batch_size = batch_puzzle_indices.size  # Global effective batch size, excluding pads
+
+                    # Drop last batch
+                    if global_effective_batch_size < self.config.global_batch_size:
+                        stop_iteration = True
+                        break
+
+                    batch_indices        = batch_indices       [self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
+                    batch_puzzle_indices = batch_puzzle_indices[self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
+
+                    # Validate puzzle indices before indexing
+                    if len(batch_puzzle_indices) > 0:
+                        max_puzzle_idx = batch_puzzle_indices.max()
+                        if max_puzzle_idx >= len(dataset["puzzle_identifiers"]):
+                            raise IndexError(
+                                f"Puzzle index {max_puzzle_idx} out of bounds for puzzle_identifiers array of size {len(dataset['puzzle_identifiers'])}"
+                            )
+
+                    batch = self._collate_batch({
+                        "inputs": dataset["inputs"][batch_indices],
+                        "labels": dataset["labels"][batch_indices],
+                        "puzzle_identifiers": dataset["puzzle_identifiers"][batch_puzzle_indices]
+                    })
+
+                    yield set_name, batch, global_effective_batch_size
                 
     def __iter__(self):
         worker_info = get_worker_info()
