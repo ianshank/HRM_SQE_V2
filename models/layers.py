@@ -77,13 +77,20 @@ class CastedEmbedding(nn.Module):
                  cast_to: torch.dtype):
         super().__init__()
         self.cast_to = cast_to
+        self.num_embeddings = num_embeddings
 
         # Truncated LeCun normal init
         self.embedding_weight = nn.Parameter(
             trunc_normal_init_(torch.empty((num_embeddings, embedding_dim)), std=init_std)
         )
-        
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # Validate input indices to prevent CUDA assertion errors
+        if input.max() >= self.num_embeddings or input.min() < 0:
+            raise IndexError(
+                f"Embedding input indices out of bounds: min={input.min()}, max={input.max()}, "
+                f"valid range=[0, {self.num_embeddings-1}], num_embeddings={self.num_embeddings}"
+            )
         return F.embedding(input, self.embedding_weight.to(self.cast_to))
 
 
